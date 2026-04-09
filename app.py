@@ -147,19 +147,41 @@ async def send_embed_dump(interaction: discord.Interaction, data: dict, title: s
         display_key = prettify_key(key)
 
         # Handle Arrays (e.g., Roletags, Lists of objects)
+        # Handle Arrays (e.g., Trades, Roletags, Threads)
         if isinstance(value, list):
-            if not value: continue # Skip empty lists
+            if not value: continue 
             
             items = []
             for item in value[:10]:
                 if isinstance(item, dict):
-                    # Smart extraction: If the dict has a 'label', 'name', or 'discordUsername', just print that cleanly!
-                    name = item.get("label") or item.get("name") or item.get("discordUsername")
-                    if name:
+                    # --- SMART EXTRACTION LOGIC ---
+                    
+                    # 1. Check for Trade Data (Side + Ticker + Amount)
+                    if "side" in item and "ticker" in item:
+                        side_emoji = "🟢" if item.get("side") == "BUY" else "🔴"
+                        amount = format_amount(item.get("amount", 0))
+                        price = format_amount(item.get("price", 0))
+                        items.append(f"{side_emoji} **{item.get('side')}** {item.get('ticker')} | {amount} @ {price}")
+                    
+                    # 2. Check for User/Role Data (Label/Username)
+                    elif any(k in item for k in ["label", "name", "discordUsername"]):
+                        name = item.get("label") or item.get("name") or item.get("discordUsername")
                         items.append(f"• {str(name).title()}")
+                        
+                    # 3. Check for Forum/Notification Data (Title/Type)
+                    elif any(k in item for k in ["title", "type"]):
+                        text = item.get("title") or item.get("type")
+                        items.append(f"• {text}")
+
+                    # 4. Fallback for other objects: Hide IDs and show first 3 relevant fields
                     else:
-                        summary = " | ".join([f"**{k}**: {v}" for k, v in item.items() if isinstance(v, (str, int, float))][:2])
-                        items.append(f"• {summary}")
+                        summary_parts = []
+                        for k, v in item.items():
+                            if k.lower() in ["id", "userid", "threadid"] or v in [None, ""]:
+                                continue
+                            summary_parts.append(f"**{prettify_key(k)}**: {v}")
+                            if len(summary_parts) >= 3: break
+                        items.append(f"• " + " | ".join(summary_parts))
                 else:
                     items.append(f"• {item}")
             
