@@ -3,6 +3,7 @@ from discord.ext import commands
 from discord import app_commands
 import aiohttp
 import os
+import re
 import json
 from dotenv import load_dotenv
 from flask import Flask
@@ -105,105 +106,92 @@ def format_amount(value):
 # REFINED HELPER FUNCTION
 # ==========================================
 
+def prettify_key(key: str) -> str:
+    """Helper to turn camelCase or snake_case into Title Case (e.g., discordUsername -> Discord Username)"""
+    s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', key)
+    return re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).replace('_', ' ').title()
+
 async def send_embed_dump(interaction: discord.Interaction, data: dict, title: str):
     """Dynamic Embed Builder: Professionally formats ANY TSR API JSON response."""
     if "error" in data:
         return await interaction.followup.send(f"❌ **Error:** {data['error']}")
 
-    # --- Step 1: Initialize the Embed with a Smart Title ---
+    # 1. explicit keys to hide from the UI to keep it clean
+    IGNORE_KEYS = {"userId", "discordUserId", "discordAvatarHash", "id", "impersonation"}
+
+    # 2. Setup the Title
+    primary_id = data.get("displayName") or data.get("name") or data.get("ticker")
+    embed_title = f"{title}: {primary_id}" if primary_id else title
+    embed = discord.Embed(title=embed_title, color=discord.Color.from_rgb(0, 204, 255))
     
-    # Check common fields to pull a descriptive ID for the title
-    # For a user: displayName; for a stock: ticker; for an event: id
-    primary_id = data.get("id") or data.get("ticker") or data.get("displayName") or "Data Report"
-    
-    embed = discord.Embed(
-        title=f"{title}: {primary_id}" if primary_id != "Data Report" else title,
-        color=discord.Color.from_rgb(0, 204, 255) # A vibrant, modern color
-    )
-    
-    # --- Step 2: Handle Images (Avatars, Thumbnails) ---
-    # Convert 'image_0.png' style references to 'image_0.png' keys in the data.
-    # We create a generic image variable to catch common URL fields
+    # 3. Setup Images (Avatars / Banners)
     avatar_url = data.get("avatarUrl") or data.get("avatar_url")
     thumbnail_url = data.get("thumbnailUrl") or data.get("thumbnail_url")
     image_url = data.get("imageUrl") or data.get("image_url") or data.get("banner_url")
     
-    # Apply the Picture! Avatars/Thumbnails go in the corner.
-    # Product or event images become the large image.
-    if avatar_url:
-        embed.set_thumbnail(url=avatar_url)
-    elif thumbnail_url:
-        embed.set_thumbnail(url=thumbnail_url)
-    elif image_url:
-        embed.set_image(url=image_url)
+    if avatar_url: embed.set_thumbnail(url=avatar_url)
+    elif thumbnail_url: embed.set_thumbnail(url=thumbnail_url)
+    elif image_url: embed.set_image(url=image_url)
 
-    # --- Step 3: Iterate and Format the Data Fields ---
-    
+    # 4. Iterate and Format Data
     desc_list = []
     field_count = 0
 
     for key, value in data.items():
-        if field_count >= 25: break # Discord field limit
+        if field_count >= 25: break 
         
-        # We handle Images in Step 2. Do not re-add their URL text here.
-        if "Url" in key or "_url" in key or key in ["avatarUrl", "thumbnailUrl", "banner_url", "image_url"]:
-             continue
-             
-        # Skip the primary ID, we already added it to the title.
-        if key in ["id", "displayName", "ticker"]:
+        # Skip useless keys, empty strings, None values, and raw URLs
+        if key in IGNORE_KEYS or value in [None, ""] or "url" in key.lower() or "hash" in key.lower():
              continue
 
-        # Convert keys like 'rakeback_balance' to 'Rakeback Balance'
-        display_key = key.replace('_', ' ').title()
+        display_key = prettify_key(key)
 
-        # Handle Lists (Bulleted Format)
+        # Handle Arrays (e.g., Roletags, Lists of objects)
         if isinstance(value, list):
-            desc_list.append(f"\n**{display_key}**")
-            if not value:
-                desc_list.append("• *Empty*\n")
-            else:
-                for item in value[:10]: # Limit to top 10 for performance
-                    if isinstance(item, dict):
-                        # Extract key string/number values to summarize a complex object
-                        summary = " | ".join([f"**{k}**: {v}" for k, v in item.items() if isinstance(v, (str, int, float))][:3])
-                        desc_list.append(f"• {summary}")
+            if not value: continue # Skip empty lists
+            
+            items = []
+            for item in value[:10]:
+                if isinstance(item, dict):
+                    # Smart extraction: If the dict has a 'label', 'name', or 'discordUsername', just print that cleanly!
+                    name = item.get("label") or item.get("name") or item.get("discordUsername")
+                    if name:
+                        items.append(f"• {str(name).title()}")
                     else:
-                        desc_list.append(f"• {item}")
-                    
-        # Handle Nested Dictionaries (Stacked Fields Format)
+                        summary = " | ".join([f"**{k}**: {v}" for k, v in item.items() if isinstance(v, (str, int, float))][:2])
+                        items.append(f"• {summary}")
+                else:
+                    items.append(f"• {item}")
+            
+            if items:
+                desc_list.append(f"**{display_key}**\n" + "\n".join(items))
+                
+        # Handle Nested Dictionaries
         elif isinstance(value, dict):
             sub_desc = []
             for k, v in value.items():
-                if isinstance(v, (str, int, float, bool)):
-                    val_str = str(v)
-                    # For complex sub-data, format the amount if it looks like one.
-                    if any(term in k.lower() for term in ["amount", "balance", "price", "value", "score"]):
-                         val_str = format_amount(v)
-                    sub_desc.append(f"**{k.replace('_', ' ').title()}**: {val_str}")
+                if v in [None, ""]: continue
+                val_str = format_amount(v) if any(t in k.lower() for t in ["amount", "balance", "price", "value", "score"]) else str(v)
+                sub_desc.append(f"**{prettify_key(k)}**: {val_str}")
             if sub_desc:
-                combined_sub_desc = "\n".join(sub_desc)
-                if len(combined_sub_desc) > 1024:
-                    combined_sub_desc = combined_sub_desc[:1020] + "..."
-                embed.add_field(name=display_key, value=combined_sub_desc, inline=False)
+                embed.add_field(name=display_key, value="\n".join(sub_desc)[:1024], inline=False)
                 field_count += 1
                 
-        # Handle Basic Key/Values (Standard Fields Format)
+        # Handle Standard Key/Values
         else:
-            final_value = str(value)
-            
-            # Automatically recognize money/score fields and apply comma formatting.
-            if any(term in key.lower() for term in ["amount", "balance", "price", "value", "score", "shares", "totalShares", "delta", "deltaPercent"]):
-                final_value = format_amount(value)
+            if isinstance(value, bool):
+                final_value = "✅ Yes" if value else "❌ No"
+            else:
+                final_value = str(value)
+                # Auto-format money/scores
+                if any(term in key.lower() for term in ["amount", "balance", "price", "value", "score", "shares", "delta"]):
+                    final_value = format_amount(value)
 
             embed.add_field(name=display_key, value=final_value, inline=True)
             field_count += 1
             
-    # Combine lists and general descriptions
-    combined_desc = "\n".join(desc_list).strip()
-    if combined_desc:
-        if len(combined_desc) > 4000:
-             combined_desc = combined_desc[:4000] + "\n...[Truncated]"
-        embed.description = combined_desc
+    if desc_list:
+        embed.description = "\n\n".join(desc_list)[:4000]
         
     embed.set_footer(text="Powered by the TSR Community API")
     await interaction.followup.send(embed=embed)
