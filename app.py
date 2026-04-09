@@ -36,6 +36,17 @@ class TSRBot(commands.Bot):
 
     async def setup_hook(self):
         self.session = aiohttp.ClientSession(headers={"Authorization": f"Bearer {TSR_API_KEY}"})
+        
+        # Global Error Handler to silently ignore late interaction timeouts (10062)
+        async def on_tree_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+            if isinstance(error, app_commands.CommandInvokeError):
+                if isinstance(error.original, discord.errors.NotFound) and error.original.code == 10062:
+                    print(f"Ignored a late interaction timeout from {interaction.user}.")
+                    return
+            print(f"Command Error: {error}")
+            
+        self.tree.on_error = on_tree_error
+
         try:
             synced = await self.tree.sync()
             print(f"Bot is ready! Synced {len(synced)} slash commands globally.")
@@ -90,11 +101,55 @@ def format_amount(value):
     sign = "-" if negative else ""
     return f"{sign}{whole_formatted}.{frac}" if frac else f"{sign}{whole_formatted}"
 
-async def send_json_dump(interaction, data):
-    """Helper to send large JSON payloads safely."""
-    if "error" in data: return await interaction.followup.send(f"Error: {data['error']}")
-    formatted = json.dumps(data, indent=2)[:1980]
-    await interaction.followup.send(f"```json\n{formatted}\n```")
+async def send_embed_dump(interaction: discord.Interaction, data: dict, title: str):
+    """Dynamic Embed Builder: Converts ANY JSON response into a formatted Discord Embed."""
+    if "error" in data:
+        return await interaction.followup.send(f"❌ **Error:** {data['error']}")
+
+    embed = discord.Embed(title=title, color=discord.Color.blurple())
+    desc = ""
+    field_count = 0
+
+    for key, value in data.items():
+        if field_count >= 25: break # Discord limits embeds to 25 fields
+        
+        # Format Arrays as Bulleted Lists
+        if isinstance(value, list):
+            desc += f"\n**{key.replace('_', ' ').title()}**\n"
+            if not value: desc += "• *Empty*\n"
+            for item in value[:10]: # Cap at 10 items to prevent massive walls of text
+                if isinstance(item, dict):
+                    # Pull the first 3 string/number items out to summarize the object
+                    summary = " | ".join([f"**{k}**: {v}" for k, v in item.items() if isinstance(v, (str, int, float))][:3])
+                    desc += f"• {summary}\n"
+                else:
+                    desc += f"• {item}\n"
+                    
+        # Format Nested Dictionaries as Fields
+        elif isinstance(value, dict):
+            sub_desc = ""
+            for k, v in value.items():
+                if isinstance(v, (str, int, float, bool)):
+                    val_str = str(v)
+                    if len(val_str) > 100: val_str = val_str[:100] + "..."
+                    sub_desc += f"**{k}**: {val_str}\n"
+            if sub_desc:
+                if len(sub_desc) > 1024: sub_desc = sub_desc[:1020] + "..."
+                embed.add_field(name=key.title(), value=sub_desc, inline=False)
+                field_count += 1
+                
+        # Format Standard Key/Values as Inline Fields
+        else:
+            embed.add_field(name=key.replace('_', ' ').title(), value=str(value), inline=True)
+            field_count += 1
+
+    if len(desc) > 4000:
+        desc = desc[:4000] + "\n...[Truncated]"
+        
+    embed.description = desc.strip() or "Data retrieved successfully."
+    embed.set_footer(text="Powered by the TSR Community API")
+    await interaction.followup.send(embed=embed)
+
 
 # ==========================================
 # 1. ACCOUNT & PROFILE (READ / WRITE)
@@ -104,19 +159,19 @@ async def send_json_dump(interaction, data):
 async def my_basic(interaction: discord.Interaction):
     await interaction.response.defer()
     data = await fetch_tsr("/me")
-    await send_json_dump(interaction, data)
+    await send_embed_dump(interaction, data, "👤 Basic Profile")
 
 @bot.tree.command(name="my_full", description="Full account snapshot")
 async def my_full(interaction: discord.Interaction):
     await interaction.response.defer()
     data = await fetch_tsr("/me/full?fresh=1")
-    await send_json_dump(interaction, data)
+    await send_embed_dump(interaction, data, "📊 Full Account Snapshot")
 
 @bot.tree.command(name="my_trades", description="View your recent trades")
 async def my_trades(interaction: discord.Interaction):
     await interaction.response.defer()
     data = await fetch_tsr("/me/trades?limit=10")
-    await send_json_dump(interaction, data)
+    await send_embed_dump(interaction, data, "📈 Recent Trades")
 
 @bot.tree.command(name="update_profile", description="Update your public profile display name")
 async def update_profile(interaction: discord.Interaction, display_name: str):
@@ -132,16 +187,10 @@ async def update_profile(interaction: discord.Interaction, display_name: str):
 @bot.tree.command(name="transfer", description="Send TSR tokens to another user")
 async def transfer(interaction: discord.Interaction, user: discord.Member, amount: str, memo: str = None):
     await interaction.response.defer()
-    payload = {
-        "toDiscordUserId": str(user.id),
-        "toDiscordUsername": user.name,
-        "amount": amount
-    }
+    payload = {"toDiscordUserId": str(user.id), "toDiscordUsername": user.name, "amount": amount}
     if memo: payload["memo"] = memo
-    
     data = await post_tsr("/transfers", payload)
     if "error" in data: return await interaction.followup.send(f"❌ Transfer Failed: {data['error']}")
-    
     await interaction.followup.send(f"💸 **Transfer Successful!** Sent {amount} TSR to {user.mention}.")
 
 # ==========================================
@@ -152,7 +201,7 @@ async def transfer(interaction: discord.Interaction, user: discord.Member, amoun
 async def notifications(interaction: discord.Interaction):
     await interaction.response.defer()
     data = await fetch_tsr("/notifications?unread=1")
-    await send_json_dump(interaction, data)
+    await send_embed_dump(interaction, data, "🔔 Unread Notifications")
 
 @bot.tree.command(name="mark_notification_read", description="Mark a specific notification ID as read")
 async def mark_notification_read(interaction: discord.Interaction, notif_id: str):
@@ -171,7 +220,6 @@ async def profile(interaction: discord.Interaction, member: discord.Member = Non
     await interaction.response.defer()
     data = await fetch_tsr(f"/users/{target.id}")
     if "error" in data: return await interaction.followup.send(f"Error: {data['error']}")
-    
     prof = data.get("profile", {})
     embed = discord.Embed(title=f"TSR Profile: {prof.get('displayName', target.name)}", color=discord.Color.blue())
     embed.add_field(name="Role", value=prof.get("role", "USER"), inline=True)
@@ -182,7 +230,7 @@ async def profile(interaction: discord.Interaction, member: discord.Member = Non
 async def reputation(interaction: discord.Interaction, member: discord.Member):
     await interaction.response.defer()
     data = await fetch_tsr(f"/users/{member.id}/reputation?limit=5")
-    await send_json_dump(interaction, data)
+    await send_embed_dump(interaction, data, f"⭐ Reputation Notes: {member.display_name}")
 
 @bot.tree.command(name="add_reputation", description="Leave a reputation note for a user")
 @app_commands.choices(value=[app_commands.Choice(name="Positive (+1)", value=1), app_commands.Choice(name="Negative (-1)", value=-1)])
@@ -223,7 +271,7 @@ async def stock_info(interaction: discord.Interaction, ticker: str):
     embed.add_field(name="All-Time High", value=format_amount(stats.get("allTimeHigh")))
     await interaction.followup.send(embed=embed)
 
-@bot.tree.command(name="stock_candles", description="Get candlestick chart data (JSON)")
+@bot.tree.command(name="stock_candles", description="Get candlestick chart data")
 @app_commands.choices(interval=[
     app_commands.Choice(name="1 Minute", value="1m"),
     app_commands.Choice(name="1 Hour", value="1h"),
@@ -232,31 +280,31 @@ async def stock_info(interaction: discord.Interaction, ticker: str):
 async def stock_candles(interaction: discord.Interaction, ticker: str, interval: app_commands.Choice[str]):
     await interaction.response.defer()
     data = await fetch_tsr(f"/stocks/{ticker.upper()}/candles?interval={interval.value}&limit=5")
-    await send_json_dump(interaction, data)
+    await send_embed_dump(interaction, data, f"🕯️ {ticker.upper()} Candlesticks")
 
 @bot.tree.command(name="stock_price", description="Latest price snapshot for a stock")
 async def stock_price(interaction: discord.Interaction, ticker: str):
     await interaction.response.defer()
     data = await fetch_tsr(f"/stocks/{ticker.upper()}/price")
-    await send_json_dump(interaction, data)
+    await send_embed_dump(interaction, data, f"💰 {ticker.upper()} Live Price")
 
 @bot.tree.command(name="stock_orderbook", description="View the orderbook for a stock")
 async def stock_orderbook(interaction: discord.Interaction, ticker: str):
     await interaction.response.defer()
     data = await fetch_tsr(f"/stocks/{ticker.upper()}/orderbook")
-    await send_json_dump(interaction, data)
+    await send_embed_dump(interaction, data, f"📚 {ticker.upper()} Orderbook")
 
 @bot.tree.command(name="stock_trades", description="View recent trades for a stock")
 async def stock_trades(interaction: discord.Interaction, ticker: str):
     await interaction.response.defer()
     data = await fetch_tsr(f"/stocks/{ticker.upper()}/trades")
-    await send_json_dump(interaction, data)
+    await send_embed_dump(interaction, data, f"🔄 {ticker.upper()} Recent Trades")
 
 @bot.tree.command(name="ceo_leaderboard", description="View the stock market CEO leaderboard")
 async def ceo_leaderboard(interaction: discord.Interaction):
     await interaction.response.defer()
     data = await fetch_tsr("/stocks/leaderboard")
-    await send_json_dump(interaction, data)
+    await send_embed_dump(interaction, data, "👑 CEO Leaderboard")
 
 # ==========================================
 # 6. FORUM (READ / WRITE)
@@ -266,19 +314,19 @@ async def ceo_leaderboard(interaction: discord.Interaction):
 async def forum_threads(interaction: discord.Interaction):
     await interaction.response.defer()
     data = await fetch_tsr("/forum/threads?sort=latest&category=all&limit=5")
-    await send_json_dump(interaction, data)
+    await send_embed_dump(interaction, data, "💬 Recent Forum Threads")
 
 @bot.tree.command(name="forum_read", description="Read a specific forum thread")
 async def forum_read(interaction: discord.Interaction, thread_id: str):
     await interaction.response.defer()
     data = await fetch_tsr(f"/forum/threads/{thread_id}")
-    await send_json_dump(interaction, data)
+    await send_embed_dump(interaction, data, "📄 Forum Thread")
 
 @bot.tree.command(name="forum_replies", description="Read replies to a thread")
 async def forum_replies(interaction: discord.Interaction, thread_id: str):
     await interaction.response.defer()
     data = await fetch_tsr(f"/forum/threads/{thread_id}/posts?limit=5")
-    await send_json_dump(interaction, data)
+    await send_embed_dump(interaction, data, "💬 Thread Replies")
 
 @bot.tree.command(name="forum_create_thread", description="Create a new forum thread")
 async def forum_create_thread(interaction: discord.Interaction, category_id: str, title: str, content: str):
@@ -328,25 +376,25 @@ async def yapwar_active(interaction: discord.Interaction):
 async def yapwar_list(interaction: discord.Interaction):
     await interaction.response.defer()
     data = await fetch_tsr("/yapwars")
-    await send_json_dump(interaction, data)
+    await send_embed_dump(interaction, data, "⚔️ Yapwars List")
 
 @bot.tree.command(name="yapwar_rules", description="Read the rules of Yapwars")
 async def yapwar_rules(interaction: discord.Interaction):
     await interaction.response.defer()
     data = await fetch_tsr("/yapwars/rules")
-    await send_json_dump(interaction, data)
+    await send_embed_dump(interaction, data, "📜 Yapwar Rules")
 
 @bot.tree.command(name="yapwar_stats", description="Get stats for a specific Yapwar")
 async def yapwar_stats(interaction: discord.Interaction, war_id: str):
     await interaction.response.defer()
     data = await fetch_tsr(f"/yapwars/{war_id}/stats")
-    await send_json_dump(interaction, data)
+    await send_embed_dump(interaction, data, "📊 Yapwar Stats")
 
 @bot.tree.command(name="yapwar_activity", description="Recent activity feed for a Yapwar")
 async def yapwar_activity(interaction: discord.Interaction, war_id: str):
     await interaction.response.defer()
     data = await fetch_tsr(f"/yapwars/{war_id}/activity")
-    await send_json_dump(interaction, data)
+    await send_embed_dump(interaction, data, "⚡ Yapwar Activity Feed")
 
 # ==========================================
 # 8. SHOP & GOALS
@@ -358,14 +406,14 @@ async def shop(interaction: discord.Interaction):
     data = await fetch_tsr("/shop/products")
     products = data.get("products", [])
     desc = "\n".join([f"**{p.get('name')}** - {format_amount(p.get('price'))} TSR" for p in products if p.get("active")])
-    embed = discord.Embed(title="TSR Shop", description=desc or "Shop is empty.", color=discord.Color.magenta())
+    embed = discord.Embed(title="🛒 TSR Shop", description=desc or "Shop is empty.", color=discord.Color.magenta())
     await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="goals", description="View active community goals")
 async def goals(interaction: discord.Interaction):
     await interaction.response.defer()
     data = await fetch_tsr("/community-goals")
-    await send_json_dump(interaction, data)
+    await send_embed_dump(interaction, data, "🎯 Community Goals")
 
 # ==========================================
 # 9. REFERRALS
@@ -375,7 +423,7 @@ async def goals(interaction: discord.Interaction):
 async def referrals(interaction: discord.Interaction):
     await interaction.response.defer()
     data = await fetch_tsr("/account/referrals/invites")
-    await send_json_dump(interaction, data)
+    await send_embed_dump(interaction, data, "🔗 My Referrals")
 
 @bot.tree.command(name="create_referral", description="Create a new referral invite code")
 async def create_referral(interaction: discord.Interaction, label: str, custom_code: str = None):
@@ -399,8 +447,7 @@ async def ping_referral(interaction: discord.Interaction):
 
 @bot.tree.command(name="help", description="View a list of all available TSR bot commands")
 async def help_command(interaction: discord.Interaction):
-    # Removed the defer() line entirely because this command requires no network requests!
-    
+    # Respond instantly to prevent 10062 timeouts on the help menu
     embed = discord.Embed(
         title="🤖 TSR Bot Command Guide", 
         description="Here is everything I can do. Type `/` and click my icon to see the required inputs for each command!", 
@@ -416,9 +463,8 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(name="🛒 Shop, Goals & Referrals", value="`/shop` `/goals` `/referrals` `/create_referral` `/ping_referral`", inline=False)
     
     embed.set_footer(text="Powered by the TSR Community API")
-    
-    # Respond instantly
     await interaction.response.send_message(embed=embed)
+
 
 if __name__ == "__main__":
     if not DISCORD_TOKEN or not TSR_API_KEY:
