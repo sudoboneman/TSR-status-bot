@@ -36,23 +36,27 @@ class TSRBot(commands.Bot):
         self.session = None
 
     async def setup_hook(self):
+        # 1. Initialize the API session for TSR
         self.session = aiohttp.ClientSession(headers={"Authorization": f"Bearer {TSR_API_KEY}"})
         
-        # Global Error Handler to silently ignore late interaction timeouts (10062)
+        # 2. Global Error Handler for the Command Tree
+        # This stops late timeouts (error 10062) from filling your logs
         async def on_tree_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
             if isinstance(error, app_commands.CommandInvokeError):
                 if isinstance(error.original, discord.errors.NotFound) and error.original.code == 10062:
-                    print(f"Ignored a late interaction timeout from {interaction.user}.")
-                    return
+                    return 
             print(f"Command Error: {error}")
             
         self.tree.on_error = on_tree_error
 
+        # 3. Simple Sync on Startup
+        # This registers all commands with Discord so they show in autocomplete
         try:
             synced = await self.tree.sync()
-            print(f"Bot is ready! Synced {len(synced)} slash commands globally.")
-        except Exception as e:
-            print(f"Failed to sync commands: {e}")
+            print(f"✅ Bot started and synced {len(synced)} commands.")
+        except discord.errors.HTTPException as e:
+            # If you see this in your logs, you are currently rate-limited by Discord
+            print(f"❌ Could not sync: {e}")
 
     async def close(self):
         if self.session:
