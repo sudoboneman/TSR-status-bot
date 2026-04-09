@@ -101,55 +101,112 @@ def format_amount(value):
     sign = "-" if negative else ""
     return f"{sign}{whole_formatted}.{frac}" if frac else f"{sign}{whole_formatted}"
 
+# ==========================================
+# REFINED HELPER FUNCTION
+# ==========================================
+
 async def send_embed_dump(interaction: discord.Interaction, data: dict, title: str):
-    """Dynamic Embed Builder: Converts ANY JSON response into a formatted Discord Embed."""
+    """Dynamic Embed Builder: Professionally formats ANY TSR API JSON response."""
     if "error" in data:
         return await interaction.followup.send(f"❌ **Error:** {data['error']}")
 
-    embed = discord.Embed(title=title, color=discord.Color.blurple())
-    desc = ""
+    # --- Step 1: Initialize the Embed with a Smart Title ---
+    
+    # Check common fields to pull a descriptive ID for the title
+    # For a user: displayName; for a stock: ticker; for an event: id
+    primary_id = data.get("id") or data.get("ticker") or data.get("displayName") or "Data Report"
+    
+    embed = discord.Embed(
+        title=f"{title}: {primary_id}" if primary_id != "Data Report" else title,
+        color=discord.Color.from_rgb(0, 204, 255) # A vibrant, modern color
+    )
+    
+    # --- Step 2: Handle Images (Avatars, Thumbnails) ---
+    # Convert 'image_0.png' style references to 'image_0.png' keys in the data.
+    # We create a generic image variable to catch common URL fields
+    avatar_url = data.get("avatarUrl") or data.get("avatar_url")
+    thumbnail_url = data.get("thumbnailUrl") or data.get("thumbnail_url")
+    image_url = data.get("imageUrl") or data.get("image_url") or data.get("banner_url")
+    
+    # Apply the Picture! Avatars/Thumbnails go in the corner.
+    # Product or event images become the large image.
+    if avatar_url:
+        embed.set_thumbnail(url=avatar_url)
+    elif thumbnail_url:
+        embed.set_thumbnail(url=thumbnail_url)
+    elif image_url:
+        embed.set_image(url=image_url)
+
+    # --- Step 3: Iterate and Format the Data Fields ---
+    
+    desc_list = []
     field_count = 0
 
     for key, value in data.items():
-        if field_count >= 25: break # Discord limits embeds to 25 fields
+        if field_count >= 25: break # Discord field limit
         
-        # Format Arrays as Bulleted Lists
+        # We handle Images in Step 2. Do not re-add their URL text here.
+        if "Url" in key or "_url" in key or key in ["avatarUrl", "thumbnailUrl", "banner_url", "image_url"]:
+             continue
+             
+        # Skip the primary ID, we already added it to the title.
+        if key in ["id", "displayName", "ticker"]:
+             continue
+
+        # Convert keys like 'rakeback_balance' to 'Rakeback Balance'
+        display_key = key.replace('_', ' ').title()
+
+        # Handle Lists (Bulleted Format)
         if isinstance(value, list):
-            desc += f"\n**{key.replace('_', ' ').title()}**\n"
-            if not value: desc += "• *Empty*\n"
-            for item in value[:10]: # Cap at 10 items to prevent massive walls of text
-                if isinstance(item, dict):
-                    # Pull the first 3 string/number items out to summarize the object
-                    summary = " | ".join([f"**{k}**: {v}" for k, v in item.items() if isinstance(v, (str, int, float))][:3])
-                    desc += f"• {summary}\n"
-                else:
-                    desc += f"• {item}\n"
+            desc_list.append(f"\n**{display_key}**")
+            if not value:
+                desc_list.append("• *Empty*\n")
+            else:
+                for item in value[:10]: # Limit to top 10 for performance
+                    if isinstance(item, dict):
+                        # Extract key string/number values to summarize a complex object
+                        summary = " | ".join([f"**{k}**: {v}" for k, v in item.items() if isinstance(v, (str, int, float))][:3])
+                        desc_list.append(f"• {summary}")
+                    else:
+                        desc_list.append(f"• {item}")
                     
-        # Format Nested Dictionaries as Fields
+        # Handle Nested Dictionaries (Stacked Fields Format)
         elif isinstance(value, dict):
-            sub_desc = ""
+            sub_desc = []
             for k, v in value.items():
                 if isinstance(v, (str, int, float, bool)):
                     val_str = str(v)
-                    if len(val_str) > 100: val_str = val_str[:100] + "..."
-                    sub_desc += f"**{k}**: {val_str}\n"
+                    # For complex sub-data, format the amount if it looks like one.
+                    if any(term in k.lower() for term in ["amount", "balance", "price", "value", "score"]):
+                         val_str = format_amount(v)
+                    sub_desc.append(f"**{k.replace('_', ' ').title()}**: {val_str}")
             if sub_desc:
-                if len(sub_desc) > 1024: sub_desc = sub_desc[:1020] + "..."
-                embed.add_field(name=key.title(), value=sub_desc, inline=False)
+                combined_sub_desc = "\n".join(sub_desc)
+                if len(combined_sub_desc) > 1024:
+                    combined_sub_desc = combined_sub_desc[:1020] + "..."
+                embed.add_field(name=display_key, value=combined_sub_desc, inline=False)
                 field_count += 1
                 
-        # Format Standard Key/Values as Inline Fields
+        # Handle Basic Key/Values (Standard Fields Format)
         else:
-            embed.add_field(name=key.replace('_', ' ').title(), value=str(value), inline=True)
-            field_count += 1
+            final_value = str(value)
+            
+            # Automatically recognize money/score fields and apply comma formatting.
+            if any(term in key.lower() for term in ["amount", "balance", "price", "value", "score", "shares", "totalShares", "delta", "deltaPercent"]):
+                final_value = format_amount(value)
 
-    if len(desc) > 4000:
-        desc = desc[:4000] + "\n...[Truncated]"
+            embed.add_field(name=display_key, value=final_value, inline=True)
+            field_count += 1
+            
+    # Combine lists and general descriptions
+    combined_desc = "\n".join(desc_list).strip()
+    if combined_desc:
+        if len(combined_desc) > 4000:
+             combined_desc = combined_desc[:4000] + "\n...[Truncated]"
+        embed.description = combined_desc
         
-    embed.description = desc.strip() or "Data retrieved successfully."
     embed.set_footer(text="Powered by the TSR Community API")
     await interaction.followup.send(embed=embed)
-
 
 # ==========================================
 # 1. ACCOUNT & PROFILE (READ / WRITE)
