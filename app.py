@@ -393,6 +393,33 @@ async def ping_referral(interaction: discord.Interaction):
     if "error" in data: return await interaction.followup.send(f"Error: {data['error']}")
     await interaction.followup.send("✅ Activity pinged successfully.")
 
+# ==========================================
+# 10. HELP COMMAND
+# ==========================================
+
+@bot.tree.command(name="help", description="View a list of all available TSR bot commands")
+async def help_command(interaction: discord.Interaction):
+    await interaction.response.defer()
+    
+    embed = discord.Embed(
+        title="🤖 TSR Bot Command Guide", 
+        description="Here is everything I can do. Type `/` and click my icon to see the required inputs for each command!", 
+        color=discord.Color.blurple()
+    )
+    
+    # Categorized Command Lists
+    embed.add_field(name="👤 Account & Profile", value="`/my_basic` `/my_full` `/my_trades` `/update_profile`", inline=False)
+    embed.add_field(name="💸 Transfers & Notifications", value="`/transfer` `/notifications` `/mark_notification_read`", inline=False)
+    embed.add_field(name="👥 Community & Reputation", value="`/profile` `/reputation` `/add_reputation` `/view_profile`", inline=False)
+    embed.add_field(name="📈 Stock Market", value="`/stocks` `/stock_info` `/stock_price` `/stock_candles` `/stock_orderbook` `/stock_trades` `/ceo_leaderboard`", inline=False)
+    embed.add_field(name="💬 Forum", value="`/forum_threads` `/forum_read` `/forum_replies` `/forum_create_thread` `/forum_reply` `/forum_vote` `/forum_tip`", inline=False)
+    embed.add_field(name="⚔️ Yapwars", value="`/yapwar_active` `/yapwar_list` `/yapwar_rules` `/yapwar_stats` `/yapwar_activity`", inline=False)
+    embed.add_field(name="🛒 Shop, Goals & Referrals", value="`/shop` `/goals` `/referrals` `/create_referral` `/ping_referral`", inline=False)
+    
+    embed.set_footer(text="Powered by the TSR Community API")
+    
+    await interaction.followup.send(embed=embed)
+
 
 if __name__ == "__main__":
     if not DISCORD_TOKEN or not TSR_API_KEY:
