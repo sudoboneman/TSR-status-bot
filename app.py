@@ -31,7 +31,7 @@ BASE_URL = "https://api.tsrhub.org/v1"
 # --- BOT SETUP ---
 class TSRBot(commands.Bot):
     def __init__(self):
-        super().__init__(command_prefix="!", intents=discord.Intents.default())
+        super().__init__(command_prefix="!", intents=discord.Intents.default(), help_command=None)
         self.session = None
 
     async def setup_hook(self):
@@ -399,7 +399,7 @@ async def ping_referral(interaction: discord.Interaction):
 
 @bot.tree.command(name="help", description="View a list of all available TSR bot commands")
 async def help_command(interaction: discord.Interaction):
-    await interaction.response.defer()
+    # Removed the defer() line entirely because this command requires no network requests!
     
     embed = discord.Embed(
         title="🤖 TSR Bot Command Guide", 
@@ -407,7 +407,6 @@ async def help_command(interaction: discord.Interaction):
         color=discord.Color.blurple()
     )
     
-    # Categorized Command Lists
     embed.add_field(name="👤 Account & Profile", value="`/my_basic` `/my_full` `/my_trades` `/update_profile`", inline=False)
     embed.add_field(name="💸 Transfers & Notifications", value="`/transfer` `/notifications` `/mark_notification_read`", inline=False)
     embed.add_field(name="👥 Community & Reputation", value="`/profile` `/reputation` `/add_reputation` `/view_profile`", inline=False)
@@ -418,8 +417,8 @@ async def help_command(interaction: discord.Interaction):
     
     embed.set_footer(text="Powered by the TSR Community API")
     
-    await interaction.followup.send(embed=embed)
-
+    # Respond instantly
+    await interaction.response.send_message(embed=embed)
 
 if __name__ == "__main__":
     if not DISCORD_TOKEN or not TSR_API_KEY:
