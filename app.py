@@ -195,7 +195,7 @@ async def mark_notification_read(interaction: discord.Interaction, notif_id: str
 # ==========================================
 
 @bot.tree.command(name="profile", description="Get a user's public TSR profile")
-async def profile(interaction: discord.Interaction, member: discord.Member = None):
+async def profile(interaction: discord.Interaction, member: discord.User = None):
     target = member or interaction.user
     await interaction.response.defer()
     data = await fetch_tsr(f"/users/{target.id}")
